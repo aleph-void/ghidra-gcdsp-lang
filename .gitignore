@@ -2,3 +2,4 @@
 *.sla
 *.pyc
 __pycache__/
+lib/*.jar

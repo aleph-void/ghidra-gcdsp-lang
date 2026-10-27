@@ -30,7 +30,11 @@ define register offset=0xA0 size=2 [ ax0.h ax0.l ];
 define register offset=0xA0 size=4 [ ax0 ];
 define register offset=0xB0 size=2 [ ax1.h ax1.l ];
 define register offset=0xB0 size=4 [ ax1 ];
-define register offset=0xC1 size=5 [ prod ];
+
+# Scratch registers: the product register is held in $prod.l/.m1/.h/.m2 (see GETPROD/SETPROD), and the
+# extension opcodes read their sources before the main opcode runs but write their destination registers
+# after it, so the value to write is parked here (see ext_commit below).
+define register offset=0xE0 size=2 [ xtmp0 xtmp1 ];
 
 # Program counter (word address in the inst space). Only the emulator and the pspec use it; the
 # instruction semantics branch with goto/call/return.
@@ -223,9 +227,10 @@ macro GET_SATURATED_AC0M(dest) {
 	# If the 40-bit mode is disabled, no saturation is needed.
 	if (!$(SR_40_MODE)) goto <no_saturation_needed>;
 	# If the accumulator is the same as its s32 version, no saturation is needed.
-	if (acc0 == sext(acc0:4)) goto <no_saturation_needed>;
+	local t0:5 = acc0;
+	if (t0 == sext(t0:4)) goto <no_saturation_needed>;
 	# Saturation is needed; check if it needs to be be positive or negative.
-	if (acc0 s< 0) goto <negative_saturation>;
+	if (t0 s< 0) goto <negative_saturation>;
 	# Positive
 	dest = 0x7fff;
 	goto <done>;
@@ -243,9 +248,10 @@ macro GET_SATURATED_AC1M(dest) {
 	# If the 40-bit mode is disabled, no saturation is needed.
 	if (!$(SR_40_MODE)) goto <no_saturation_needed>;
 	# If the accumulator is the same as its s32 version, no saturation is needed.
-	if (acc1 == sext(acc1:4)) goto <no_saturation_needed>;
+	local t1:5 = acc1;
+	if (t1 == sext(t1:4)) goto <no_saturation_needed>;
 	# Saturation is needed; check if it needs to be be positive or negative.
-	if (acc1 s< 0) goto <negative_saturation>;
+	if (t1 s< 0) goto <negative_saturation>;
 	# Positive
 	dest = 0x7fff;
 	goto <done>;
@@ -259,23 +265,46 @@ macro GET_SATURATED_AC1M(dest) {
 	<done>
 }
 
+# $sr is not a real register unless USE_REAL_SR_REGISTER is defined; assemble it from the flag bits
+# (bit 8 reads back as 0) or split a written value over them.
+macro READ_SR(t) {
+	t = zext($(SR_CARRY)) | (zext($(SR_OVERFLOW)) << 1) | (zext($(SR_ARITH_ZERO)) << 2) | (zext($(SR_SIGN)) << 3)
+	  | (zext($(SR_OVER_32)) << 4) | (zext($(SR_TOP2BITS)) << 5) | (zext($(SR_LOGIC_ZERO)) << 6) | (zext($(SR_OVERFLOW_STICKY)) << 7)
+	  | (zext($(SR_INT_ENABLE)) << 9) | (zext($(SR_400)) << 10) | (zext($(SR_EXT_INT_ENABLE)) << 11)
+	  | (zext($(SR_1000)) << 12) | (zext($(SR_MUL_MODIFY)) << 13) | (zext($(SR_40_MODE)) << 14) | (zext($(SR_MUL_UNSIGNED)) << 15);
+}
+
+macro WRITE_SR(v) {
+	$(SR_CARRY) = v[0,1]; $(SR_OVERFLOW) = v[1,1]; $(SR_ARITH_ZERO) = v[2,1]; $(SR_SIGN) = v[3,1];
+	$(SR_OVER_32) = v[4,1]; $(SR_TOP2BITS) = v[5,1]; $(SR_LOGIC_ZERO) = v[6,1]; $(SR_OVERFLOW_STICKY) = v[7,1];
+	$(SR_100) = 0; $(SR_INT_ENABLE) = v[9,1]; $(SR_400) = v[10,1]; $(SR_EXT_INT_ENABLE) = v[11,1];
+	$(SR_1000) = v[12,1]; $(SR_MUL_MODIFY) = v[13,1]; $(SR_40_MODE) = v[14,1]; $(SR_MUL_UNSIGNED) = v[15,1];
+}
+
 sign_extend_reg0_5_after: is _reg0_5 {}
 sign_extend_reg0_5_after: is _reg0_5=0x10 { ac0.h = sext(ac0.hreal); }
 sign_extend_reg0_5_after: is _reg0_5=0x11 { ac1.h = sext(ac1.hreal); }
 sign_extend_reg0_5_after: is _reg0_5=0x1E { SIGN_EXTEND_AC0M(); }
 sign_extend_reg0_5_after: is _reg0_5=0x1F { SIGN_EXTEND_AC1M(); }
+sign_extend_reg0_5_after: is _reg0_5=0x12 { cr = cr & 0xff; }          # $cr is an 8-bit register
+sign_extend_reg0_5_after: is _reg0_5=0x13 { WRITE_SR(sr); }            # $sr is split over the flag bits
+sign_extend_reg0_5_after: is _reg0_5=0x16 { prod.h = prod.h & 0xff; }  # $prod.h is an 8-bit register
 
 saturated_reg0_5: is _reg0_5 { export _reg0_5; }
 saturated_reg0_5: is _reg0_5=0x10 { local tmp:2 = sext(ac0.hreal); export tmp; }
 saturated_reg0_5: is _reg0_5=0x11 { local tmp:2 = sext(ac1.hreal); export tmp; }
 saturated_reg0_5: is _reg0_5=0x1E { local tmp:2; GET_SATURATED_AC0M(tmp); export tmp; }
 saturated_reg0_5: is _reg0_5=0x1F { local tmp:2; GET_SATURATED_AC1M(tmp); export tmp; }
+saturated_reg0_5: is _reg0_5=0x13 { local tmp:2; READ_SR(tmp); export tmp; }
 
 sign_extend_reg5_10_after: is _reg5_10 {}
 sign_extend_reg5_10_after: is _reg5_10=0x10 { ac0.h = sext(ac0.hreal); }
 sign_extend_reg5_10_after: is _reg5_10=0x11 { ac1.h = sext(ac1.hreal); }
 sign_extend_reg5_10_after: is _reg5_10=0x1E { SIGN_EXTEND_AC0M(); }
 sign_extend_reg5_10_after: is _reg5_10=0x1F { SIGN_EXTEND_AC1M(); }
+sign_extend_reg5_10_after: is _reg5_10=0x12 { cr = cr & 0xff; }
+sign_extend_reg5_10_after: is _reg5_10=0x13 { WRITE_SR(sr); }
+sign_extend_reg5_10_after: is _reg5_10=0x16 { prod.h = prod.h & 0xff; }
 
 attach variables [ _ar0_2 _ar5_7 ] [ ar0 ar1 ar2 ar3 ];
 attach variables [ _ix0_2 _ix2_4 _ix5_7 ] [ ix0 ix1 ix2 ix3 ];
@@ -506,17 +535,21 @@ macro FLAGS16X(result, carry, overflow, over_s32) {
 }
 
 macro FLAGS16(result, result_40) {
-	FLAGS16X(result, 0, 0, (result_40 != sext(result_40:4)));
+	local r40:5 = result_40;
+	FLAGS16X(result, 0, 0, (r40 != sext(r40:4)));
 }
 
 macro FLAGS40X(result, carry, overflow) {
 	# Flags for a 40-bit operation (like Dolphin's UpdateSR64)
+	# (The value is copied to a local first: "reg:4" on a macro argument that is a fixed register
+	# would select the four most significant bytes of a big-endian register, not the low ones.)
+	local r:5 = result;
 	$(SR_CARRY) = carry;  # Carry
 	$(SR_OVERFLOW) = overflow;  # Overflow
-	$(SR_ARITH_ZERO) = (result == 0);  # Zero
-	$(SR_SIGN) = (result s< 0);  # Sign
-	$(SR_OVER_32) = (result != sext(result:4));  # Above s32
-	$(SR_TOP2BITS) = ((result & 0xc0000000) == 0) || ((result & 0xc0000000) == 0xc0000000);  # Top 2 bits equal
+	$(SR_ARITH_ZERO) = (r == 0);  # Zero
+	$(SR_SIGN) = (r s< 0);  # Sign
+	$(SR_OVER_32) = (r != sext(r:4));  # Above s32
+	$(SR_TOP2BITS) = ((r & 0xc0000000) == 0) || ((r & 0xc0000000) == 0xc0000000);  # Top 2 bits equal
 	$(SR_OVERFLOW_STICKY) = $(SR_OVERFLOW_STICKY) | $(SR_OVERFLOW);  # Sticky overflow
 }
 
@@ -535,9 +568,36 @@ macro FLAGS_ADD40(a, b) {
 macro FLAGS_SUB40(a, b) {
 	# Flags for a 40-bit subtract (like Dolphin's UpdateSR64Sub)
 	# Carry uses an unsigned comparison to match Dolphin's isCarrySubtract.
-	# Comparing Dolphin's isOverflow in DSPIntCCUtil.h and Ghidra's OpBehaviorIntScarry.java,
-	# scarry seems to match our desired behavior here.  Note that this is the same for add and subtract
-	FLAGS40X(a - b, (a >= (a - b)), scarry(a, -b));
+	# Overflow is the signed overflow of a - b: sborrow (scarry(a, -b) is wrong when b is the most
+	# negative value, whose negation overflows).
+	FLAGS40X(a - b, (a >= (a - b)), sborrow(a, b));
+}
+
+# The product register: $prod = sext($prod.h) << 32 + ($prod.m1 + $prod.m2) << 16 + $prod.l
+# (the sum can carry into bit 40; 41 bits are kept in an 8-byte local).
+macro GETPROD(p) {
+	local ph:8 = sext(prod.h:1);
+	local pm:8 = zext(prod.m1) + zext(prod.m2);
+	local pl:8 = zext(prod.l);
+	p = (ph << 32) + (pm << 16) + pl;
+}
+
+# Writes a result of the multiplier (low 40 bits of v): $prod.m2 is cleared.
+macro SETPROD(v) {
+	prod.l = v:2;
+	prod.m1 = v[16,16];
+	prod.h = zext(v[32,8]);
+	prod.m2 = 0;
+}
+
+# 16x16 signed multiply; the result is doubled when $sr.AM is 0.
+macro MULT(res, a, b) {
+	local x:8 = sext(a);
+	local y:8 = sext(b);
+	res = x * y;
+	if ($(SR_MUL_MODIFY)) goto <done>;
+	res = res << 1;
+	<done>
 }
 
 #---------------------------------------------------------------------------------------------------
@@ -605,6 +665,11 @@ r_opp:"" is epsilon {
 # due to the 2-byte word size (e.g. if inst_start is 0x400, globalset(loopskipaddr) would use
 # address 0x201 instead of address 0x402). Using a wrapper like this avoids the issue, for some
 # reason (perhaps because it's marking it as a pointer?)
+# Return addresses stored in $st0 are word addresses; inst_next in the semantic section would be the
+# byte offset (twice that), so compute them at disassembly time.
+CallRet1:tmp is epsilon [ tmp = inst_start + 1; ] { export *[const]:2 tmp; }
+CallRet2:tmp is epsilon [ tmp = inst_start + 2; ] { export *[const]:2 tmp; }
+
 AfterLoopWrapper:tmp is epsilon [ tmp = inst_start + 2; ] { export *[inst]:1 tmp; }
 
 # 0000 0000 010r rrrr
@@ -721,9 +786,9 @@ r_opp:Addr16 is cc & op4_8=0b1001 & op8_16=2; Addr16 {
 
 # 0000 0010 1011 cccc aaaa aaaa aaaa aaaa
 r_opc:"CALL"^cc is cc & op4_8=0b1011 & op8_16=2; imm16 {}
-r_opp:Addr16    is cc & op4_8=0b1011 & op8_16=2; Addr16 {
-	st0 = inst_next;
+r_opp:Addr16    is cc & op4_8=0b1011 & op8_16=2; Addr16 & CallRet2 {
 	if (!cc) goto inst_next;
+	st0 = CallRet2;
 	call Addr16;
 }
 
@@ -743,18 +808,21 @@ r_opc:"RTI"^cc is cc {}
 r_opp:"" is cc {
 	if (!cc) goto inst_next;
 
-	tmp:2 = 0; # TODO: Return address
-	return [tmp];
+	# Restore $sr from the data stack $st1 and return through the call stack $st0.
+	WRITE_SR(st1);
+	return [st0];
 }
 }
 
 # Unconditional variants
 
 # 0000 0010 0111 1111
-# Unconditionally execute the next opcode, presumably... not very useful?  Mark as unimpl so that a warning occurs
+# Unconditionally executes the next opcode (the condition "always")
 with : cc0_4=0b1111 & op4_8=0b0111 & op8_16=2 {
 r_opc:"IF" is epsilon {}
-r_opp:"" is epsilon unimpl
+r_opp:"" is epsilon {
+	delayslot(1);
+}
 }
 
 # 0000 0010 1001 1111 aaaa aaaa aaaa aaaa
@@ -765,8 +833,8 @@ r_opp:Addr16 is cc0_4=0b1111 & op4_8=0b1001 & op8_16=2; Addr16 {
 
 # 0000 0010 1011 1111 aaaa aaaa aaaa aaaa
 r_opc:"CALL" is cc0_4=0b1111 & op4_8=0b1011 & op8_16=2; imm16 {}
-r_opp:Addr16 is cc0_4=0b1111 & op4_8=0b1011 & op8_16=2; Addr16 {
-	st0 = inst_next;
+r_opp:Addr16 is cc0_4=0b1111 & op4_8=0b1011 & op8_16=2; Addr16 & CallRet2 {
+	st0 = CallRet2;
 	call Addr16;
 }
 
@@ -782,8 +850,8 @@ r_opp:"" is epsilon {
 with : cc0_4=0b1111 & op4_8=0b1111 & op8_16=2 {
 r_opc:"RTI" is epsilon {}
 r_opp:"" is epsilon {
-	tmp:2 = 0; # TODO: Return address
-	return [tmp];
+	WRITE_SR(st1);
+	return [st0];
 }
 }
 
@@ -1104,9 +1172,9 @@ r_opp:reg5_8 is cc & reg5_8 {
 # 0001 0111 rrr1 cccc
 with : op5=1 & op8_16=0b00010111 {
 r_opc:"CALLR"^cc is cc {}
-r_opp:reg5_8 is cc & reg5_8 {
+r_opp:reg5_8 is cc & reg5_8 & CallRet1 {
 	if (!cc) goto inst_next;
-	# TODO: Update stack
+	st0 = CallRet1;
 	call [reg5_8];
 }
 }
@@ -1122,8 +1190,8 @@ r_opp:reg5_8 is reg5_8 {
 # 0001 0111 rrr1 1111
 with : cc0_4=0b1111 & op5=1 & op8_16=0b00010111 {
 r_opc:"CALLR" is epsilon {}
-r_opp:reg5_8 is reg5_8 {
-	# TODO: Update stack
+r_opp:reg5_8 is reg5_8 & CallRet1 {
+	st0 = CallRet1;
 	call [reg5_8];
 }
 }
@@ -1132,7 +1200,8 @@ r_opp:reg5_8 is reg5_8 {
 with : op7_9=0b00 & op9_16=0b0001100 {
 r_opc:"LRR" is epsilon {}
 r_opp:reg0_5, "@"^ar5_7 is reg0_5 & ar5_7 & sign_extend_reg0_5_after {
-	reg0_5 = *[data]:2 ar5_7;
+	local v:2 = *[data]:2 ar5_7;
+	reg0_5 = v;
 	build sign_extend_reg0_5_after;
 }
 }
@@ -1141,8 +1210,9 @@ r_opp:reg0_5, "@"^ar5_7 is reg0_5 & ar5_7 & sign_extend_reg0_5_after {
 with : op7_9=0b01 & op9_16=0b0001100 {
 r_opc:"LRRD" is epsilon {}
 r_opp:reg0_5, "@"^ar5_7 is reg0_5 & ar5_7 & sign_extend_reg0_5_after {
-	reg0_5 = *[data]:2 ar5_7;
+	local v:2 = *[data]:2 ar5_7;
 	ar5_7 = ar5_7 - 1;
+	reg0_5 = v;
 	build sign_extend_reg0_5_after;
 }
 }
@@ -1151,8 +1221,9 @@ r_opp:reg0_5, "@"^ar5_7 is reg0_5 & ar5_7 & sign_extend_reg0_5_after {
 with : op7_9=0b10 & op9_16=0b0001100 {
 r_opc:"LRRI" is epsilon {}
 r_opp:reg0_5, "@"^ar5_7 is reg0_5 & ar5_7 & sign_extend_reg0_5_after {
-	reg0_5 = *[data]:2 ar5_7;
+	local v:2 = *[data]:2 ar5_7;
 	ar5_7 = ar5_7 + 1;
+	reg0_5 = v;
 	build sign_extend_reg0_5_after;
 }
 }
@@ -1161,8 +1232,9 @@ r_opp:reg0_5, "@"^ar5_7 is reg0_5 & ar5_7 & sign_extend_reg0_5_after {
 with : op7_9=0b11 & op9_16=0b0001100 {
 r_opc:"LRRN" is epsilon {}
 r_opp:reg0_5, "@"^ar5_7, ix5_7 is reg0_5 & ar5_7 & ix5_7 & sign_extend_reg0_5_after {
-	reg0_5 = *[data]:2 ar5_7;
+	local v:2 = *[data]:2 ar5_7;
 	ar5_7 = ar5_7 + ix5_7;  # ar5_7 and ix5_7 are the same bits in the instruction.  I've included it in the disassembly, but it's not like that in the manual.
+	reg0_5 = v;
 	build sign_extend_reg0_5_after;
 }
 }
@@ -1318,7 +1390,7 @@ a_opp:aacm0 is aacm0 & aacf0 {
 with : aop2_4=1 & aop4_8=0b0011 & axbit=1 {
 a_opc:"LSRNRX" is epsilon {}
 a_opp:aacf0, aaxh1 is aacf0 & aaxh1 {
-	TwoWayLogicalShift(aacf0, aaxh1[0,6]);
+	TwoWayLogicalShift(aacf0, aaxh1);
 }
 }
 
@@ -1326,7 +1398,7 @@ a_opp:aacf0, aaxh1 is aacf0 & aaxh1 {
 with : aop2_4=2 & aop4_8=0b0011 & axbit=1 {
 a_opc:"ASRNRX" is epsilon {}
 a_opp:aacf0, aaxh1 is aacf0 & aaxh1 {
-	TwoWayArithmeticShift(aacf0, aaxh1[0,6]);
+	TwoWayArithmeticShift(aacf0, aaxh1);
 }
 }
 
@@ -1351,8 +1423,10 @@ a_opp:aacf0, aacm0_other is aacf0 & aacm0_other {
 with : aop3=0 & aop4_8=0b0100 {
 a_opc:"ADDR" is epsilon {}
 a_opp:aacf0, aax1_2 is aacf0 & aax1_2 {
-	FLAGS_ADD40(aacf0, sext(aax1_2));
-	aacf0 = aacf0 + sext(aax1_2);
+	local v:5 = sext(aax1_2);
+	v = v << 16;
+	FLAGS_ADD40(aacf0, v);
+	aacf0 = aacf0 + v;
 }
 }
 
@@ -1378,8 +1452,10 @@ a_opp:aacf0, aacf0_other is aacf0 & aacf0_other {
 with : aop1=1 & aop2_4=3 & aop4_8=0b0100 {
 a_opc:"ADDP" is epsilon {}
 a_opp:aacf0 is aacf0 {
-	FLAGS_ADD40(aacf0, prod);
-	aacf0 = aacf0 + prod;
+	local p8:8; GETPROD(p8);
+	local p:5 = p8:5;
+	FLAGS_ADD40(aacf0, p);
+	aacf0 = aacf0 + p;
 }
 }
 
@@ -1387,8 +1463,10 @@ a_opp:aacf0 is aacf0 {
 with : aop3=0 & aop4_8=0b0101 {
 a_opc:"SUBR" is epsilon {}
 a_opp:aacf0, aax1_2 is aacf0 & aax1_2 {
-	FLAGS_SUB40(aacf0, sext(aax1_2));
-	aacf0 = aacf0 - sext(aax1_2);
+	local v:5 = sext(aax1_2);
+	v = v << 16;
+	FLAGS_SUB40(aacf0, v);
+	aacf0 = aacf0 - v;
 }
 }
 
@@ -1414,8 +1492,10 @@ a_opp:aacf0, aacf0_other is aacf0 & aacf0_other {
 with : aop1=1 & aop2_4=3 & aop4_8=0b0101 {
 a_opc:"SUBP" is epsilon {}
 a_opp:aacf0 is aacf0 {
-	FLAGS_SUB40(aacf0, prod);
-	aacf0 = aacf0 - prod;
+	local p8:8; GETPROD(p8);
+	local p:5 = p8:5;
+	FLAGS_SUB40(aacf0, p);
+	aacf0 = aacf0 - p;
 }
 }
 
@@ -1452,7 +1532,8 @@ a_opp:aacf0, aacf0_other is aacf0 & aacf0_other {
 with : aop1=1 & aop2_4=3 & aop4_8=0b0110 {
 a_opc:"MOVP" is epsilon {}
 a_opp:aacf0 is aacf0 {
-	aacf0 = prod;
+	local p8:8; GETPROD(p8);
+	aacf0 = p8:5;
 	FLAGS40(aacf0);
 }
 }
@@ -1515,7 +1596,9 @@ a_opp:aacf0 is aacf0 {
 with : aop1=1 & aop2_4=3 & aop4_8=0b0111 {
 a_opc:"MOVNP" is epsilon {}
 a_opp:aacf0 is aacf0 {
-	aacf0 = -prod;
+	local p8:8; GETPROD(p8);
+	local p:5 = p8:5;
+		aacf0 = -p;
 	FLAGS40(aacf0);
 }
 }
@@ -1548,7 +1631,7 @@ a_opp:""    is epsilon {
 with : aop0_3=0b011 & aop3=0 & aop4_8=0b1000 {
 a_opc:"MULAXH" is epsilon {}
 a_opp:         is epsilon {
-	prod = zext(ax0.h) * zext(ax0.h);
+	local p8:8; MULT(p8, ax0.h, ax0.h); SETPROD(p8);
 }
 }
 
@@ -1560,7 +1643,6 @@ a_opp:""     is epsilon {
 	prod.m1 = 0xfff0;
 	prod.h  = 0x00ff;
 	prod.m2 = 0x0010;
-	prod = 0;
 }
 }
 
@@ -1568,7 +1650,9 @@ a_opp:""     is epsilon {
 with : aop0_3=0b101 & aop3=0 & aop4_8=0b1000 {
 a_opc:"TSTPROD" is epsilon {}
 a_opp:          is epsilon {
-	FLAGS40(prod);
+	local p8:8; GETPROD(p8);
+	local p:5 = p8:5;
+	FLAGS40(p);
 }
 }
 
@@ -1623,7 +1707,7 @@ a_opp:""      is epsilon { $(SR_40_MODE) = 1; }
 # TODO: "$sr.AM bit affects multiply result"
 with : aop0_3=0b000 & aop4_8=0b1001 {
 a_opc:"MUL" is epsilon {}
-a_opp:aaxl3, aaxh3 is aaxl3 & aaxh3 { prod = sext(aaxl3) * sext(aaxh3); }
+a_opp:aaxl3, aaxh3 is aaxl3 & aaxh3 { local p8:8; MULT(p8, aaxl3, aaxh3); SETPROD(p8); }
 }
 
 # 1001 r001 xxxx xxxx
@@ -1639,8 +1723,11 @@ a_opp:aacf3 is aacf3 {
 with : aop1_3=0b01 & aop4_8=0b1001 {
 a_opc:"MULMVZ" is epsilon {}
 a_opp:aaxl3, aaxh3, aacf0 is aacf0 & aaxl3 & aaxh3 {
-	aacf0 = prod & 0xffffffff0000;
-	prod = sext(aaxl3) * sext(aaxh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aaxl3, aaxh3);
+	local t:8 = old & 0xffffffffffff0000;
+	aacf0 = t:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1649,8 +1736,10 @@ a_opp:aaxl3, aaxh3, aacf0 is aacf0 & aaxl3 & aaxh3 {
 with : aop1_3=0b10 & aop4_8=0b1001 {
 a_opc:"MULAC" is epsilon {}
 a_opp:aaxl3, aaxh3, aacf0 is aacf0 & aaxl3 & aaxh3 {
-	aacf0 = aacf0 + prod;
-	prod = sext(aaxl3) * sext(aaxh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aaxl3, aaxh3);
+	aacf0 = aacf0 + old:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1659,8 +1748,10 @@ a_opp:aaxl3, aaxh3, aacf0 is aacf0 & aaxl3 & aaxh3 {
 with : aop1_3=0b11 & aop4_8=0b1001 {
 a_opc:"MULMV" is epsilon {}
 a_opp:aaxl3, aaxh3, aacf0 is aacf0 & aaxl3 & aaxh3 {
-	aacf0 = prod;
-	prod = sext(aaxl3) * sext(aaxh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aaxl3, aaxh3);
+	aacf0 = old:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1669,7 +1760,7 @@ a_opp:aaxl3, aaxh3, aacf0 is aacf0 & aaxl3 & aaxh3 {
 with : aop0_3=0b000 & aop5_8=0b101 {
 a_opc:"MULX" is epsilon {}
 a_opp:aax0lh4, aax1lh3 is aax1lh3 & aax0lh4 & aaxh3 {
-	prod = sext(aax0lh4) * sext(aax1lh3);
+	local p8:8; MULT(p8, aax0lh4, aax1lh3); SETPROD(p8);
 }
 }
 
@@ -1696,8 +1787,11 @@ a_opp:aacf3 is aacf3 {
 with : aop1_3=0b01 & aop5_8=0b101 {
 a_opc:"MULXMVZ" is epsilon {}
 a_opp:aax0lh4, aax1lh3, aacf0 is aacf0 & aax1lh3 & aax0lh4 {
-	aacf0 = prod & 0xffffffff0000;
-	prod = sext(aax0lh4) * sext(aax1lh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aax0lh4, aax1lh3);
+	local t:8 = old & 0xffffffffffff0000;
+	aacf0 = t:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1706,8 +1800,10 @@ a_opp:aax0lh4, aax1lh3, aacf0 is aacf0 & aax1lh3 & aax0lh4 {
 with : aop1_3=0b10 & aop5_8=0b101 {
 a_opc:"MULXAC" is epsilon {}
 a_opp:aax0lh4, aax1lh3, aacf0 is aacf0 & aax1lh3 & aax0lh4 {
-	aacf0 = aacf0 + prod;
-	prod = sext(aax0lh4) * sext(aax1lh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aax0lh4, aax1lh3);
+	aacf0 = aacf0 + old:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1716,8 +1812,10 @@ a_opp:aax0lh4, aax1lh3, aacf0 is aacf0 & aax1lh3 & aax0lh4 {
 with : aop1_3=0b11 & aop5_8=0b101 {
 a_opc:"MULXMV" is epsilon {}
 a_opp:aax0lh4, aax1lh3, aacf0 is aacf0 & aax1lh3 & aax0lh4 {
-	aacf0 = prod;
-	prod = sext(aax0lh4) * sext(aax1lh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aax0lh4, aax1lh3);
+	aacf0 = old:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1726,7 +1824,7 @@ a_opp:aax0lh4, aax1lh3, aacf0 is aacf0 & aax1lh3 & aax0lh4 {
 with : aop0_3=0b000 & aop5_8=0b110 {
 a_opc:"MULC" is epsilon {}
 a_opp:aacm4, aaxh3 is aaxh3 & aacm4 {
-	prod = sext(aacm4) * sext(aaxh3);
+	local p8:8; MULT(p8, aacm4, aaxh3); SETPROD(p8);
 }
 }
 
@@ -1734,7 +1832,9 @@ a_opp:aacm4, aaxh3 is aaxh3 & aacm4 {
 with : aop0_3=0b001 & aop5_8=0b110 {
 a_opc:"CMPAXH" is epsilon {}
 a_opp:aacf3, aaxh4 is aacf3 & aaxh4 {
-	FLAGS_SUB40(aacf3, (sext(aaxh4) << 16));
+	local v:5 = sext(aaxh4);
+	v = v << 16;
+	FLAGS_SUB40(aacf3, v);
 }
 }
 
@@ -1742,8 +1842,11 @@ a_opp:aacf3, aaxh4 is aacf3 & aaxh4 {
 with : aop1_3=0b01 & aop5_8=0b110 {
 a_opc:"MULCMVZ" is epsilon {}
 a_opp:aacm4, aaxh3, aacf0 is aacf0 & aaxh3 & aacm4 {
-	aacf0 = prod & 0xffffffff0000;
-	prod = sext(aacm4) * sext(aaxh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aacm4, aaxh3);
+	local t:8 = old & 0xffffffffffff0000;
+	aacf0 = t:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1752,8 +1855,10 @@ a_opp:aacm4, aaxh3, aacf0 is aacf0 & aaxh3 & aacm4 {
 with : aop1_3=0b10 & aop5_8=0b110 {
 a_opc:"MULCAC" is epsilon {}
 a_opp:aacm4, aaxh3, aacf0 is aacf0 & aaxh3 & aacm4 {
-	aacf0 = aacf0 + prod;
-	prod = sext(aacm4) * sext(aaxh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aacm4, aaxh3);
+	aacf0 = aacf0 + old:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1762,8 +1867,10 @@ a_opp:aacm4, aaxh3, aacf0 is aacf0 & aaxh3 & aacm4 {
 with : aop1_3=0b11 & aop5_8=0b110 {
 a_opc:"MULCMV" is epsilon {}
 a_opp:aacm4, aaxh3, aacf0 is aacf0 & aaxh3 & aacm4 {
-	aacf0 = prod;
-	prod = sext(aacm4) * sext(aaxh3);
+	local old:8; GETPROD(old);
+	local new:8; MULT(new, aacm4, aaxh3);
+	aacf0 = old:5;
+	SETPROD(new);
 	FLAGS40(aacf0);
 }
 }
@@ -1772,7 +1879,7 @@ a_opp:aacm4, aaxh3, aacf0 is aacf0 & aaxh3 & aacm4 {
 with : aop2_4=0b00 & aop4_8=0b1110 {
 a_opc:"MADDX" is epsilon {}
 a_opp:aax0lh1, aax1lh0 is aax1lh0 & aax0lh1 {
-	prod = prod + (sext(aax0lh1) * sext(aax1lh0));
+	local p8:8; GETPROD(p8); local m8:8; MULT(m8, aax0lh1, aax1lh0); p8 = p8 + m8; SETPROD(p8);
 }
 }
 
@@ -1780,7 +1887,7 @@ a_opp:aax0lh1, aax1lh0 is aax1lh0 & aax0lh1 {
 with : aop2_4=0b01 & aop4_8=0b1110 {
 a_opc:"MSUBX" is epsilon {}
 a_opp:aax0lh1, aax1lh0 is aax1lh0 & aax0lh1 {
-	prod = prod - (sext(aax0lh1) * sext(aax1lh0));
+	local p8:8; GETPROD(p8); local m8:8; MULT(m8, aax0lh1, aax1lh0); p8 = p8 - m8; SETPROD(p8);
 }
 }
 
@@ -1788,7 +1895,7 @@ a_opp:aax0lh1, aax1lh0 is aax1lh0 & aax0lh1 {
 with : aop2_4=0b10 & aop4_8=0b1110 {
 a_opc:"MADDC" is epsilon {}
 a_opp:aacm1, aaxh0 is aaxh0 & aacm1 {
-	prod = prod + (sext(aacm1) * sext(aaxh0));
+	local p8:8; GETPROD(p8); local m8:8; MULT(m8, aacm1, aaxh0); p8 = p8 + m8; SETPROD(p8);
 }
 }
 
@@ -1796,7 +1903,7 @@ a_opp:aacm1, aaxh0 is aaxh0 & aacm1 {
 with : aop2_4=0b11 & aop4_8=0b1110 {
 a_opc:"MSUBC" is epsilon {}
 a_opp:aacm1, aaxh0 is aaxh0 & aacm1 {
-	prod = prod - (sext(aacm1) * sext(aaxh0));
+	local p8:8; GETPROD(p8); local m8:8; MULT(m8, aacm1, aaxh0); p8 = p8 - m8; SETPROD(p8);
 }
 }
 
@@ -1813,7 +1920,7 @@ a_opp:aacf0 is aacf0 {
 with : aop1_4=0b001 & aop4_8=0b1111 {
 a_opc:"MADD" is epsilon {}
 a_opp:aaxl0, aaxh0 is aaxl0 & aaxh0 {
-	prod = prod + (sext(aaxl0) * sext(aaxh0));
+	local p8:8; GETPROD(p8); local m8:8; MULT(m8, aaxl0, aaxh0); p8 = p8 + m8; SETPROD(p8);
 }
 }
 
@@ -1830,29 +1937,37 @@ a_opp:aacf0   is aacf0 {
 with : aop1_4=0b011 & aop4_8=0b1111 {
 a_opc:"MSUB" is epsilon {}
 a_opp:aaxl0, aaxh0 is aaxl0 & aaxh0 {
-	prod = prod - (sext(aaxl0) * sext(aaxh0));
+	local p8:8; GETPROD(p8); local m8:8; MULT(m8, aaxl0, aaxh0); p8 = p8 - m8; SETPROD(p8);
 }
 }
 
 # 1111 10sd xxxx xxxx
+# Manual: $acD.hm = $prod.hm + $ax.h ... the description says the secondary accumulator $axS is added
+# (as a 32-bit value) to the product register; $acD.l is cleared.
 with : aop2_4=0b10 & aop4_8=0b1111 {
 a_opc:"ADDPAXZ" is epsilon {}
 a_opp:aacf0, aaxf1 is aacf0 & aaxf1 {
-	oldprod:5 = prod;
-	# TODO: Does the masking happen before or after?
-	# i.e. do prod.l and ax0.l/ax1.l affect the result?
-	aacf0 = (prod + sext(aaxf1)) & 0xffffffff0000;
-	# TODO: Why doesn't this set the overflow bit?
-	FLAGS40X(aacf0, oldprod > aacf0, 0);
+	local p8:8; GETPROD(p8);
+	local x:8 = sext(aaxf1);
+	local r:8 = (p8 + x) & 0xffffffffffff0000;
+	aacf0 = r:5;
+	FLAGS40(aacf0);
 }
 }
 
 # 1111 110r xxxx xxxx
+# Round to even: if bit 16 of $acR is set add 0x8000, otherwise add 0x7fff, then clear $acR.l
 with : aop1_4=0b110 & aop4_8=0b1111 {
 a_opc:"CLRL" is epsilon {}
 a_opp:aacl0 is aacl0 & aacf0 {
-	# TODO: This should be round-to-even
-	aacl0 = 0;
+	local r:5 = aacf0;
+	if ((r & 0x10000) != 0) goto <odd>;
+	r = r + 0x7fff;
+	goto <done>;
+	<odd>
+	r = r + 0x8000;
+	<done>
+	aacf0 = r & 0xffffff0000;
 	FLAGS40(aacf0);
 }
 }
@@ -1861,7 +1976,9 @@ a_opp:aacl0 is aacl0 & aacf0 {
 with : aop1_4=0b111 & aop4_8=0b1111 {
 a_opc:"MOVPZ" is epsilon {}
 a_opp:aacf0 is aacf0 {
-	aacf0 = prod & 0xffffffff0000;
+	local p8:8; GETPROD(p8);
+	local t:8 = p8 & 0xffffffffffff0000;
+	aacf0 = t:5;
 	FLAGS40(aacf0);
 }
 }
@@ -1872,19 +1989,26 @@ a_opp:aacf0 is aacf0 {
 # This is so that arithmetic opcodes with aop4_8=0b0011 can be implemented correctly;
 # they only have 7 bits of the extension opcode and treat the top bit as 0.
 #
-# Extension opcodes are executed in parallel with arithmetic opcodes; they both receive the input
-# state (and weird behavior happens if they both write to the same register, which is only possible
-# with 'L or 'LN). This is not currently emulated; instead, we execute the arithmetic opcode
-# followed by the extension opcode.
+# Extension opcodes run in parallel with the arithmetic opcode: both read the state from before the
+# instruction, and when both write the same register the extension's write wins.  The extension
+# part is therefore split in two tables (see the combination logic at the end of the file):
+#   ext_opp0/ext_opp1     displayed, runs BEFORE the main opcode: reads its sources, loads/stores memory,
+#                         updates the address registers, and leaves the value to be written in
+#                         xtmp0/xtmp1;
+#   ext_commit0/1         runs AFTER the main opcode: writes the destination registers (with the
+#                         40-bit sign extension of $acX.m loads).
 #
 # In this section, bits are numbered like this:
 # xxxx xxxx X654 3210
 # where the X bit is used to choose between ext_opc0 and ext_opc1, but not directly used otherwise.
 #---------------------------------------------------------------------------------------------------
 
+ext_commit0: is epsilon {}
+ext_commit1: is epsilon {}
+
 # xxxx xxxx 0000 00xx
-# xop2_4=0 and xop4_8=0 encodes 'NOP, but we don't explicitly show that because it would result in
-# a lot of noise for no gain. Note that the bottom two bits are unrestricted, though.
+# xop2_4=0 and xop4_7=0 encodes 'NOP, but we don't explicitly show that because it would result in
+# a lot of noise for no gain. Note that the bottom two bits are unrestricted.
 
 # xxxx xxxx 0000 01rr
 with : xop2_4=1 & xop4_7=0 {
@@ -1908,64 +2032,71 @@ ext_opp0:xar0_2, xix0_2 is xar0_2 & xix0_2 { xar0_2 = xar0_2 + xix0_2; }
 # xxxx xxxx 0001 ddss
 with : xop4_7=1 {
 ext_opc0:"MV" is epsilon {}
-ext_opp0:xax2_4, xac0_2 is xac0_2 & xax2_4 & saturated_xac0_2 { xax2_4 = saturated_xac0_2; }
+ext_opp0:xax2_4, xac0_2 is xac0_2 & xax2_4 & saturated_xac0_2 { xtmp0 = saturated_xac0_2; }
+ext_commit0: is xax2_4 { xax2_4 = xtmp0; }
 }
 
 # xxxx xxxx 01dd d0ss
 with : xop2=0 & xop6=1 {
 ext_opc0:"L" is epsilon {}
-ext_opp0:xac3_6, "@"^xar0_2 is xar0_2 & xac3_6 & sign_extend_xac3_6_after { xac3_6 = *[data]:2 xar0_2; xar0_2 = xar0_2 + 1; build sign_extend_xac3_6_after; }
+ext_opp0:xac3_6, "@"^xar0_2 is xar0_2 & xac3_6 { xtmp0 = *[data]:2 xar0_2; xar0_2 = xar0_2 + 1; }
+ext_commit0: is xac3_6 & sign_extend_xac3_6_after { xac3_6 = xtmp0; build sign_extend_xac3_6_after; }
 }
 
 # xxxx xxxx 01dd d1ss
 # xar0_2 and xix0_2 are the same bits in the instruction.  The manual doesn't show xix0_2, but I've included it in the disassembly.
 with : xop2=1 & xop6=1 {
 ext_opc0:"LN" is epsilon {}
-ext_opp0:xac3_6, "@"^xar0_2, xix0_2 is xar0_2 & xix0_2 & xac3_6 & sign_extend_xac3_6_after { xac3_6 = *[data]:2 xar0_2; xar0_2 = xar0_2 + xix0_2; build sign_extend_xac3_6_after; }
+ext_opp0:xac3_6, "@"^xar0_2, xix0_2 is xar0_2 & xix0_2 & xac3_6 { xtmp0 = *[data]:2 xar0_2; xar0_2 = xar0_2 + xix0_2; }
+ext_commit0: is xac3_6 & sign_extend_xac3_6_after { xac3_6 = xtmp0; build sign_extend_xac3_6_after; }
 }
 
 # xxxx xxxx 10dd 000s
 with : xop1=0 & xop2_4=0 & xop6=0 {
 ext_opc1:"LS" is epsilon {}
 ext_opp1:xax4_6, xacm0 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar0;
+	xtmp0 = *[data]:2 ar0;
 	*[data]:2 ar3 = saturated_xacm0;
 	ar0 = ar0 + 1;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 10dd 010s
 with : xop1=0 & xop2_4=1 & xop6=0 {
 ext_opc1:"LSN" is epsilon {}
 ext_opp1:xax4_6, xacm0 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar0;
+	xtmp0 = *[data]:2 ar0;
 	*[data]:2 ar3 = saturated_xacm0;
 	ar0 = ar0 + ix0;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 10dd 100s
 with : xop1=0 & xop2_4=2 & xop6=0 {
 ext_opc1:"LSM" is epsilon {}
 ext_opp1:xax4_6, xacm0 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar0;
+	xtmp0 = *[data]:2 ar0;
 	*[data]:2 ar3 = saturated_xacm0;
 	ar0 = ar0 + 1;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 10dd 110s
 with : xop1=0 & xop2_4=3 & xop6=0 {
 ext_opc1:"LSNM" is epsilon {}
 ext_opp1:xax4_6, xacm0 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar0;
+	xtmp0 = *[data]:2 ar0;
 	*[data]:2 ar3 = saturated_xacm0;
 	ar0 = ar0 + ix0;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 001s s0dd
@@ -1985,44 +2116,48 @@ ext_opp0:"@"^xar0_2, xac3_5, xix0_2 is xar0_2 & xac3_5 & xix0_2 & saturated_xac3
 with : xop1=1 & xop2_4=0 & xop6=0 {
 ext_opc1:"SL" is epsilon {}
 ext_opp1:xacm0, xax4_6 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 ar3;
 	*[data]:2 ar0 = saturated_xacm0;
 	ar0 = ar0 + 1;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 10dd 011s
 with : xop1=1 & xop2_4=1 & xop6=0 {
 ext_opc1:"SLN" is epsilon {}
 ext_opp1:xacm0, xax4_6 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 ar3;
 	*[data]:2 ar0 = saturated_xacm0;
 	ar0 = ar0 + ix0;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 10dd 101s
 with : xop1=1 & xop2_4=2 & xop6=0 {
 ext_opc1:"SLM" is epsilon {}
 ext_opp1:xacm0, xax4_6 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 ar3;
 	*[data]:2 ar0 = saturated_xacm0;
 	ar0 = ar0 + 1;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 10dd 111s
 with : xop1=1 & xop2_4=3 & xop6=0 {
 ext_opc1:"SLNM" is epsilon {}
 ext_opp1:xacm0, xax4_6 is xacm0 & xax4_6 & saturated_xacm0 {
-	xax4_6 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 ar3;
 	*[data]:2 ar0 = saturated_xacm0;
 	ar0 = ar0 + ix0;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xax4_6 { xax4_6 = xtmp0; }
 }
 
 # xxxx xxxx 11dr 00ss
@@ -2033,11 +2168,12 @@ ext_opp1:xacm0, xax4_6 is xacm0 & xax4_6 & saturated_xacm0 {
 with : xop2_4=0 & xop6=1 {
 ext_opc1:"LD" is epsilon {}
 ext_opp1:xax0lh5, xax1lh4, "@"^xar0_2 is xar0_2 & xax1lh4 & xax0lh5 {
-	xax0lh5 = *[data]:2 xar0_2;
-	xax1lh4 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 xar0_2;
+	xtmp1 = *[data]:2 ar3;
 	xar0_2 = xar0_2 + 1;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xax1lh4 & xax0lh5 { xax0lh5 = xtmp0; xax1lh4 = xtmp1; }
 }
 
 # xxxx xxxx 11sr 0011
@@ -2046,79 +2182,85 @@ ext_opp1:xax0lh5, xax1lh4, "@"^xar0_2 is xar0_2 & xax1lh4 & xax0lh5 {
 # ax0.h and ax0.l or ax1.h and ax1.l.  AR2 cannot be used.  M/N exist like normal.
 with : xop0_2=3 & xop2_4=0 & xop6=1 {
 ext_opc1:"LDAX" is epsilon {}
-ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xaxl4 & xaxh4 {
-	xaxh4 = *[data]:2 xar5;
-	xaxl4 = *[data]:2 ar3;
+ext_opp1:xax4, "@"^xar5 is xax4 & xar5 {
+	xtmp0 = *[data]:2 xar5;
+	xtmp1 = *[data]:2 ar3;
 	xar5 = xar5 + 1;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xaxl4 & xaxh4 { xaxh4 = xtmp0; xaxl4 = xtmp1; }
 }
 
 # xxxx xxxx 11dr 01ss
-# xar0_2 and xix0_2 are the same bits in the instruction.  I haven't included it here (or in LDNM).
 with : xop2_4=1 & xop6=1 {
 ext_opc1:"LDN" is epsilon {}
 ext_opp1:xax0lh5, xax1lh4, "@"^xar0_2 is xar0_2 & xax1lh4 & xax0lh5 & xix0_2 {
-	xax0lh5 = *[data]:2 xar0_2;
-	xax1lh4 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 xar0_2;
+	xtmp1 = *[data]:2 ar3;
 	xar0_2 = xar0_2 + xix0_2;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xax1lh4 & xax0lh5 { xax0lh5 = xtmp0; xax1lh4 = xtmp1; }
 }
 
 # xxxx xxxx 11sr 0111
 with : xop0_2=3 & xop2_4=1 & xop6=1 {
 ext_opc1:"LDAXN" is epsilon {}
-ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xaxl4 & xaxh4 & xix5 {
-	xaxh4 = *[data]:2 xar5;
-	xaxl4 = *[data]:2 ar3;
+ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xix5 {
+	xtmp0 = *[data]:2 xar5;
+	xtmp1 = *[data]:2 ar3;
 	xar5 = xar5 + xix5;
 	ar3 = ar3 + 1;
 }
+ext_commit1: is xaxl4 & xaxh4 { xaxh4 = xtmp0; xaxl4 = xtmp1; }
 }
 
 # xxxx xxxx 11dr 10ss
 with : xop2_4=2 & xop6=1 {
 ext_opc1:"LDM" is epsilon {}
 ext_opp1:xax0lh5, xax1lh4, "@"^xar0_2 is xar0_2 & xax1lh4 & xax0lh5 {
-	xax0lh5 = *[data]:2 xar0_2;
-	xax1lh4 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 xar0_2;
+	xtmp1 = *[data]:2 ar3;
 	xar0_2 = xar0_2 + 1;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xax1lh4 & xax0lh5 { xax0lh5 = xtmp0; xax1lh4 = xtmp1; }
 }
 
 # xxxx xxxx 11sr 1011
 with : xop0_2=3 & xop2_4=2 & xop6=1 {
 ext_opc1:"LDAXM" is epsilon {}
-ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xaxl4 & xaxh4 {
-	xaxh4 = *[data]:2 xar5;
-	xaxl4 = *[data]:2 ar3;
+ext_opp1:xax4, "@"^xar5 is xax4 & xar5 {
+	xtmp0 = *[data]:2 xar5;
+	xtmp1 = *[data]:2 ar3;
 	xar5 = xar5 + 1;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xaxl4 & xaxh4 { xaxh4 = xtmp0; xaxl4 = xtmp1; }
 }
 
 # xxxx xxxx 11dr 11ss
 with : xop2_4=3 & xop6=1 {
 ext_opc1:"LDNM" is epsilon {}
 ext_opp1:xax0lh5, xax1lh4, "@"^xar0_2 is xar0_2 & xax1lh4 & xax0lh5 & xix0_2 {
-	xax0lh5 = *[data]:2 xar0_2;
-	xax1lh4 = *[data]:2 ar3;
+	xtmp0 = *[data]:2 xar0_2;
+	xtmp1 = *[data]:2 ar3;
 	xar0_2 = xar0_2 + xix0_2;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xax1lh4 & xax0lh5 { xax0lh5 = xtmp0; xax1lh4 = xtmp1; }
 }
 
 # xxxx xxxx 11dr 1111
 with : xop0_2=3 & xop2_4=3 & xop6=1 {
 ext_opc1:"LDAXNM" is epsilon{}
-ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xaxl4 & xaxh4 & xix5 {
-	xaxh4 = *[data]:2 xar5;
-	xaxl4 = *[data]:2 ar3;
+ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xix5 {
+	xtmp0 = *[data]:2 xar5;
+	xtmp1 = *[data]:2 ar3;
 	xar5 = xar5 + xix5;
 	ar3 = ar3 + ix3;
 }
+ext_commit1: is xaxl4 & xaxh4 { xaxh4 = xtmp0; xaxl4 = xtmp1; }
 }
 
 #---------------------------------------------------------------------------------------------------
@@ -2135,9 +2277,11 @@ ext_opp1:xax4, "@"^xar5 is xax4 & xar5 & xaxl4 & xaxh4 & xix5 {
 # First, deal with axbit's behavior for choosing extension opcodes:
 ext_opc:^ext_opc0 is ext_opc0 & (axbit=0 | aop4_8=0b0011) {}
 ext_opp:^ext_opp0 is ext_opp0 & (axbit=0 | aop4_8=0b0011) { build ext_opp0; }
+ext_post: is ext_commit0 & (axbit=0 | aop4_8=0b0011) { build ext_commit0; }
 
 ext_opc:^ext_opc1 is ext_opc1 & (axbit=1 & aop4_8!=0b0011) {}
 ext_opp:^ext_opp1 is ext_opp1 & (axbit=1 & aop4_8!=0b0011) { build ext_opp1; }
+ext_post: is ext_commit1 & (axbit=1 & aop4_8!=0b0011) { build ext_commit1; }
 
 # Regular opcodes are used directly:
 opc:^r_opc is r_opc & (op12_16<0b0011 ...) {}
@@ -2146,7 +2290,8 @@ opp:^r_opp is r_opp & (op12_16<0b0011 ...) { build r_opp; }
 # Combine arithmetic ops and extension ops:
 with : (aop4_8>0b0010) {
 opc:^a_opc^"'"^ext_opc is a_opc & ext_opc {}
-opp:^a_opp ":" ext_opp is a_opp & ext_opp { build a_opp; build ext_opp; }
+# The extension reads its sources before the main opcode runs and writes its destination after it.
+opp:^a_opp ":" ext_opp is a_opp & ext_opp & ext_post { build ext_opp; build a_opp; build ext_post; }
 
 # If the extension opcode is set to 0, it indicates 'NOP.
 # We could explicitly show 'NOP here, but that just adds noise for no benefit.

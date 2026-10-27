@@ -165,6 +165,7 @@ class Model:
         r = s40(a + b)
         c = int((a & M40) > (r & M40))
         o = int(a + b != r)
+        if os.environ.get('GCDSP_MUTATE'): c ^= 1          # used by run-tests.sh to prove that a wrong model is caught
         self.flags40(s, r, c, o)
         return r
 

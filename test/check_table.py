@@ -41,6 +41,17 @@ for w in range(65536):
     key = (man_s, gm, dm)
     if man_s == gm and gm == dm: n_ok += 1; continue
     bad[key] += 1; ex.setdefault(key, []).append(w)
+ALLOWED = {   # documented in GHIDRA-RARE.md
+    (None, 'UNUSED2A', None): "0010 101x: not in the manual's table; decoded as a no-op (the manual: 'seems to do nothing')",
+    (None, 'NOP', 'NOP'): "0001-0003: unassigned in the manual; Dolphin and this module treat them as NOP",
+    ('JRcc', 'JMPR', 'JMPR'): "unconditional JRcc spelled JMPR (both tools)", ('JRcc', 'JRcc', 'JMPR'): "Dolphin spells condition x8-xB differently",
+    ('Jcc', 'Jcc', 'JMP'): "Dolphin spells condition x8-xB differently", ('Jcc', 'JMP', 'JMP'): "unconditional Jcc spelled JMP (both tools)",
+}
+bad_total = 0
 print(f"manual == ghidra == dolphin on {n_ok}/65536 first words")
 for k, n in sorted(bad.items(), key=lambda x: -x[1]):
-    e = ex[k]; print(f"{n:6d} manual={k[0]} ghidra={k[1]} dolphin={k[2]}  e.g. {e[0]:04x}..{e[-1]:04x}")
+    e = ex[k]
+    tag = 'documented' if k in ALLOWED else 'UNEXPLAINED'
+    if k not in ALLOWED: bad_total += n
+    print(f"{n:6d} manual={k[0]} ghidra={k[1]} dolphin={k[2]}  e.g. {e[0]:04x}..{e[-1]:04x}  [{tag}]")
+sys.exit(1 if bad_total else 0)

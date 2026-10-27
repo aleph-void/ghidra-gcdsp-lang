@@ -43,26 +43,36 @@ define register offset=0x100 size=2 [ pc ];
 # Fake register for extra-fake purposes; hardware uses some of the stacks for this
 define register offset=0xF0 size=8 [ loopcontext ];
 
-# Magic to make loops work
+# Magic to make loops work.  A hardware loop (LOOP, LOOPI, BLOOP, BLOOPI) is modelled statically:
+#  - the loop instruction loads the counter into the loop-counter register of its nesting level
+#    ($st3_x below) and skips the loop when the count is zero;
+#  - the last instruction of the loop body (the next instruction for LOOP/LOOPI, the address operand
+#    for BLOOP/BLOOPI) carries the "jump back" in its context: it decrements the counter of the
+#    loop that ends there and jumps back to the first instruction of the body while it is not zero.
+# loopstackdepth is the nesting level of the instruction (it flows along the code); the other fields
+# are set on the last instruction of one loop body only (noflow).  Two loops that end on the same
+# instruction are not distinguished: the innermost one (the one disassembled last) wins.
 define context loopcontext
-	loopskipaddr = (0,15) noflow
-	hasloopcheck = (16,16) noflow
-	loopstackdepth = (17,18)
-	loopjumpbackaddr = (32,47) noflow
-	hasloopjumpback = (48,48) noflow
+	loopstackdepth = (0,1)
+	loopenddepth = (2,3) noflow
+	hasloopjumpback = (4,4) noflow
+	loopjumpbackaddr = (16,31) noflow
 ;
 
 # Loop stack for the current loop counter. We don't currently have st3 directly reflect this value,
 # because doing so would be a bit difficult.
 define register offset=0xD0 size=2 [ st3_0 st3_1 st3_2 st3_3 ];
 # Note: The outermost loop increments loopstackdepth and then uses CurSt3, so index 1 is the first.
-# Although we could reset loopstackdepth for the loop instruction, it needs to be changed for
-# the next instruction for flowing to work, and that instruction is also loopcheck, so it needs to
-# read the stack. Thus, we have this off-by-1 indexing.
+# (loopstackdepth has to be changed for the next instruction for flowing to work.)
 CurSt3: is loopstackdepth=1 { export st3_0; }
 CurSt3: is loopstackdepth=2 { export st3_1; }
 CurSt3: is loopstackdepth=3 { export st3_2; }
 CurSt3: is loopstackdepth=0 { export st3_3; }
+# The counter register of the loop that ends at this instruction
+EndSt3: is loopenddepth=1 { export st3_0; }
+EndSt3: is loopenddepth=2 { export st3_1; }
+EndSt3: is loopenddepth=3 { export st3_2; }
+EndSt3: is loopenddepth=0 { export st3_3; }
 
 # Regular and hacky implementation of status register
 @ifdef USE_REAL_SR_REGISTER
@@ -676,24 +686,23 @@ AfterLoopWrapper:tmp is epsilon [ tmp = inst_start + 2; ] { export *[inst]:1 tmp
 with : op5_8=0b010 & op8_16=0 {
 r_opc:"LOOP" is epsilon {}
 r_opp:reg0_5 is reg0_5 & saturated_reg0_5 & CurSt3 & AfterLoopWrapper [
-	hasloopcheck = 1;
 	hasloopjumpback = 1;
-	loopskipaddr = inst_start + 2;
 	loopjumpbackaddr = inst_start + 1;
 	globalset(AfterLoopWrapper, loopstackdepth);
 	loopstackdepth = loopstackdepth + 1;
-	globalset(inst_next, hasloopcheck);
+	loopenddepth = loopstackdepth;
 	globalset(inst_next, hasloopjumpback);
-	globalset(inst_next, loopskipaddr);
 	globalset(inst_next, loopjumpbackaddr);
+	globalset(inst_next, loopenddepth);
 	globalset(inst_next, loopstackdepth);
-	# Reset the addresses for this instruction - no looping should happen on this instruction, only the next one.
-	hasloopcheck = 0;
+	# The jump back belongs to the next instruction, not to this one.
 	hasloopjumpback = 0;
-	loopskipaddr = 0;
 	loopjumpbackaddr = 0;
+	loopenddepth = 0;
 ] {
-	CurSt3 = saturated_reg0_5;
+	local c:2 = saturated_reg0_5;
+	CurSt3 = c;
+	if (c == 0) goto AfterLoopWrapper;
 }
 }
 
@@ -706,24 +715,23 @@ r_opp:reg0_5, Addr16 is reg0_5 & saturated_reg0_5 & op5_8=0b011 & op8_16=0 & Cur
 r_opp:reg0_5, Addr16After is reg0_5 & saturated_reg0_5 & op5_8=0b011 & op8_16=0 & CurSt3; Addr16 & Addr16After & imm16
 @endif
 [
-	hasloopcheck = 1;
 	hasloopjumpback = 1;
-	loopskipaddr = imm16 + 1;
 	loopjumpbackaddr = inst_start + 2;
 	globalset(Addr16After, loopstackdepth);
 	loopstackdepth = loopstackdepth + 1;
-	globalset(inst_next, hasloopcheck);
+	loopenddepth = loopstackdepth;
 	globalset(Addr16, hasloopjumpback);
-	globalset(inst_next, loopskipaddr);
 	globalset(Addr16, loopjumpbackaddr);
+	globalset(Addr16, loopenddepth);
 	globalset(inst_next, loopstackdepth);
-	# Reset the addresses for this instruction - no looping should happen on this instruction, only the next one.
-	hasloopcheck = 0;
+	# The jump back belongs to the last instruction of the loop, not to this one.
 	hasloopjumpback = 0;
-	loopskipaddr = 0;
 	loopjumpbackaddr = 0;
+	loopenddepth = 0;
 ] {
-	CurSt3 = saturated_reg0_5;
+	local c:2 = saturated_reg0_5;
+	CurSt3 = c;
+	if (c == 0) goto Addr16After;
 }
 
 # 0000 0000 100d dddd iiii iiii iiii iiii
@@ -1036,24 +1044,23 @@ r_opp:ac8_11, SImm8 is SImm8 & ac8_11 & sign_extend_ac8_11_after {
 with : op8_16=0b00010000 {
 r_opc:"LOOPI" is epsilon {}
 r_opp:Imm8 is Imm8 & CurSt3 & AfterLoopWrapper [
-	hasloopcheck = 1;
 	hasloopjumpback = 1;
-	loopskipaddr = inst_start + 2;
 	loopjumpbackaddr = inst_start + 1;
 	globalset(AfterLoopWrapper, loopstackdepth);
 	loopstackdepth = loopstackdepth + 1;
-	globalset(inst_next, hasloopcheck);
+	loopenddepth = loopstackdepth;
 	globalset(inst_next, hasloopjumpback);
-	globalset(inst_next, loopskipaddr);
 	globalset(inst_next, loopjumpbackaddr);
+	globalset(inst_next, loopenddepth);
 	globalset(inst_next, loopstackdepth);
-	# Reset the addresses for this instruction - no looping should happen on this instruction, only the next one.
-	hasloopcheck = 0;
+	# The jump back belongs to the next instruction, not to this one.
 	hasloopjumpback = 0;
-	loopskipaddr = 0;
 	loopjumpbackaddr = 0;
+	loopenddepth = 0;
 ] {
-	CurSt3 = Imm8;
+	local c:2 = Imm8;
+	CurSt3 = c;
+	if (c == 0) goto AfterLoopWrapper;
 }
 }
 
@@ -1065,24 +1072,23 @@ r_opp:Imm8, Addr16 is Imm8 & op8_16=0b00010001 & CurSt3; Addr16 & Addr16After & 
 r_opp:Imm8, Addr16After is Imm8 & op8_16=0b00010001 & CurSt3; Addr16 & Addr16After & imm16
 @endif
 [
-	hasloopcheck = 1;
 	hasloopjumpback = 1;
-	loopskipaddr = imm16 + 1;
 	loopjumpbackaddr = inst_start + 2;
 	globalset(Addr16After, loopstackdepth);
 	loopstackdepth = loopstackdepth + 1;
-	globalset(inst_next, hasloopcheck);
+	loopenddepth = loopstackdepth;
 	globalset(Addr16, hasloopjumpback);
-	globalset(inst_next, loopskipaddr);
 	globalset(Addr16, loopjumpbackaddr);
+	globalset(Addr16, loopenddepth);
 	globalset(inst_next, loopstackdepth);
-	# Reset the addresses for this instruction - no looping should happen on this instruction, only the next one.
-	hasloopcheck = 0;
+	# The jump back belongs to the last instruction of the loop, not to this one.
 	hasloopjumpback = 0;
-	loopskipaddr = 0;
 	loopjumpbackaddr = 0;
+	loopenddepth = 0;
 ] {
-	CurSt3 = Imm8;
+	local c:2 = Imm8;
+	CurSt3 = c;
+	if (c == 0) goto Addr16After;
 }
 
 # 0001 0010 xxxx xiii
@@ -1300,7 +1306,13 @@ r_opp:Mem8CR, ach8display is Mem8CR & ach8display & ach8 {
 }
 }
 
-# 0010 101x mmmm mmmm is unused and seems to do nothing
+# 0010 101x mmmm mmmm is unused (the manual: "seems to do nothing"; DSPSpy's srs_test executes it).
+# It is decoded as a no-op so that analysis does not stop at it.
+with : op9_16=0b0010101 {
+r_opc:"UNUSED2A" is epsilon {}
+r_opp:Imm8 is Imm8 {
+}
+}
 
 # 0010 11ss mmmm mmmm
 with : op10_16=0b001011 {
@@ -2003,8 +2015,8 @@ a_opp:aacf0 is aacf0 {
 # where the X bit is used to choose between ext_opc0 and ext_opc1, but not directly used otherwise.
 #---------------------------------------------------------------------------------------------------
 
+# (ext_commit1 has no default: every ext_opp1 constructor has its own)
 ext_commit0: is epsilon {}
-ext_commit1: is epsilon {}
 
 # xxxx xxxx 0000 00xx
 # xop2_4=0 and xop4_7=0 encodes 'NOP, but we don't explicitly show that because it would result in
@@ -2300,22 +2312,16 @@ opp:^a_opp is a_opp & (axbit=0 | aop4_8=0b0011) & xop2_4=0 & xop4_7=0 { build a_
 }
 
 # Handle looping logic:
-LoopSkipAddrWrapper: " ->"^loopskipaddr is loopskipaddr { export *[inst]:2 loopskipaddr; }
 LoopJumpBackAddrWrapper: " =>"^loopjumpbackaddr is loopjumpbackaddr { export *[inst]:2 loopjumpbackaddr; }
 
-loopcheck:"" is hasloopcheck=0 {}
-loopcheck:LoopSkipAddrWrapper is hasloopcheck=1 & LoopSkipAddrWrapper & CurSt3 {
-	if (CurSt3 == 0) goto LoopSkipAddrWrapper;
-	CurSt3 = CurSt3 - 1;
-}
 loopjumpback:"" is hasloopjumpback=0 {}
-loopjumpback:LoopJumpBackAddrWrapper is hasloopjumpback=1 & LoopJumpBackAddrWrapper {
-	goto LoopJumpBackAddrWrapper;
+loopjumpback:LoopJumpBackAddrWrapper is hasloopjumpback=1 & LoopJumpBackAddrWrapper & EndSt3 {
+	EndSt3 = EndSt3 - 1;
+	if (EndSt3 != 0) goto LoopJumpBackAddrWrapper;
 }
 
 # Now populate the root instruction table.
-:^opc^" "^opp^loopcheck^loopjumpback is opc & opp & loopcheck & loopjumpback {
-	build loopcheck;
+:^opc^" "^opp^loopjumpback is opc & opp & loopjumpback {
 	build opp;
 	build loopjumpback;
 }

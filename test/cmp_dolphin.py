@@ -31,6 +31,24 @@ def mnem(t):
 
 MANUAL_VS_DOLPHIN = {'maddc', 'msubc', 'addpaxz', 'clrl'}
 
+def manual_vs_dolphin(g, d):
+    """True when g and d differ only by the documented operand-field disagreement between the manual
+    (followed by this module) and Dolphin's disassembler:
+      ADDPAXZ  the s and d bits are swapped (manual "1111 10sd": $acD is bit 8, $axS is bit 9);
+      CLRL     Dolphin prints $ac1.l whatever bit 8 says (manual "1111 110r");
+      MADDC/MSUBC  second operand: manual $axT.h (T = bit 8), Dolphin $ax1.l / $ax1.h."""
+    gm = mnem(g).split("'")[0]
+    gp, dp = (g.split(' : ') + [''])[:2], (d.split(' : ') + [''])[:2]
+    if gp[1] != dp[1]: return False                 # the extension part must agree exactly
+    a, b = gp[0].split(' ', 1)[1], dp[0].split(' ', 1)[1]
+    if gm == 'addpaxz':
+        m = re.fullmatch(r'\$acc(\d), \$ax(\d)', a); n = re.fullmatch(r'\$acc(\d), \$ax(\d)', b)
+        return bool(m and n and m.group(1) == n.group(2) and m.group(2) == n.group(1))
+    if gm == 'clrl':
+        return re.fullmatch(r'\$ac[01]\.l', a) is not None and b == '$ac1.l'
+    m = re.fullmatch(r'\$ac(\d)\.m, \$ax(\d)\.h', a); n = re.fullmatch(r'\$ac(\d)\.m, \$ax1\.([lh])', b)
+    return bool(m and n and m.group(1) == n.group(1) and m.group(2) == ('1' if n.group(2) == 'h' else '0'))
+
 def rules(g, d):
     """Return (rule-name, g2, d2) after applying display rules to both strings; or None."""
     gm, dm = mnem(g).split("'")[0], mnem(d).split("'")[0]
@@ -104,6 +122,31 @@ def load(p):
         d.append((parts[0], int(parts[1]), parts[2] if len(parts) > 2 else ''))
     return d
 
+def classify(h, gn, gt, dn, dt):
+    """Classify one case: ('exact',) ('both-invalid',) ('explained', name) or ('diff', key)."""
+    dbad = 'unknown opcode' in dt.lower() or "'xxx" in dt.lower()
+    gbad = gt == 'BAD'
+    if gbad and dbad: return ('both-invalid',)
+    # C0: 0010 101x mmmm mmmm is unused ("seems to do nothing" per the manual); the module decodes it as a no-op
+    if dbad and not gbad and (int(h[:2], 16) & 0xfe) == 0x2a and mnem(fold(gt)) == 'unused2a':
+        return ('explained', 'unused-2a-noop')
+    # C1: the manual lists the extension 'NOP as 0000 00xx (any low two bits); Dolphin rejects 01..03
+    if dbad and "'xxx" in dt.lower() and not gbad and (int(h[2:4], 16) & 0x7c) == 0 and "'" not in gt \
+            and mnem(fold(gt)) == mnem(fold(dt)).split("'")[0]:
+        return ('explained', 'ext-nop-low-bits')
+    if gbad or dbad or gn != dn * 2:
+        k = ('ghidra-bad dolphin=' + mnem(fold(dt)) if gbad else
+             'dolphin-invalid ghidra=' + mnem(fold(gt)) if dbad else 'length ' + mnem(fold(gt)))
+        return ('diff', k)
+    if fold(gt) == fold(dt): return ('exact',)
+    applied, g2, d2 = rules(fold(gt), fold(dt))
+    # C2: operand encodings where the manual and Dolphin's disassembler disagree (see GHIDRA-RARE.md)
+    if g2 != d2 and mnem(g2).split("'")[0] in MANUAL_VS_DOLPHIN and manual_vs_dolphin(g2, d2):
+        return ('explained', 'manual-vs-dolphin:' + mnem(g2).split("'")[0])
+    if g2 == d2:
+        return ('explained', ','.join(applied) if applied else '(none)')
+    return ('diff', 'text ' + mnem(g2))
+
 def main():
     g, d = load(sys.argv[1]), load(sys.argv[2])
     label = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith('-') else ''
@@ -112,32 +155,19 @@ def main():
     agree = both_bad = 0
     expl = collections.Counter(); unexp = collections.Counter(); ex = {}
     for (h, gn, gt), (_, dn, dt) in zip(g, d):
-        dbad = 'unknown opcode' in dt.lower() or "'xxx" in dt.lower()
-        gbad = gt == 'BAD'
-        if gbad and dbad: both_bad += 1; continue
-        # C1: the manual lists the extension 'NOP as 0000 00xx (any low two bits); Dolphin rejects 01..03
-        if dbad and "'xxx" in dt.lower() and not gbad and (int(h[2:4], 16) & 0x7c) == 0 and "'" not in gt \
-                and mnem(fold(gt)) == mnem(fold(dt)).split("'")[0]:
-            expl["ext-nop-low-bits"] += 1; continue
-        if not gbad and not dbad and gn == dn * 2 and fold(gt) == fold(dt): agree += 1; continue
-        if gbad or dbad or gn != dn * 2:
-            k = ('ghidra-bad dolphin=' + mnem(fold(dt)) if gbad else
-                 'dolphin-invalid ghidra=' + mnem(fold(gt)) if dbad else 'length ' + mnem(fold(gt)))
-            unexp[k] += 1; ex.setdefault(k, []).append((h, gt, dt)); continue
-        applied, g2, d2 = rules(fold(gt), fold(dt))
-        # C2: operand encodings where the manual and Dolphin's disassembler disagree (see GHIDRA-RARE.md)
-        if g2 != d2 and mnem(g2).split("'")[0] in MANUAL_VS_DOLPHIN:
-            expl['manual-vs-dolphin:' + mnem(g2).split("'")[0]] += 1; continue
-        if g2 == d2:
-            for a in applied: expl[a] += 1
-            if not applied: expl['(none)'] += 1
+        c = classify(h, gn, gt, dn, dt)
+        if c[0] == 'exact': agree += 1
+        elif c[0] == 'both-invalid': both_bad += 1
+        elif c[0] == 'explained':
+            for a in c[1].split(','): expl[a] += 1
         else:
-            k = 'text ' + mnem(g2)
-            unexp[k] += 1; ex.setdefault(k, []).append((h, gt, dt))
+            unexp[c[1]] += 1; ex.setdefault(c[1], []).append((h, gt, dt))
     print(f"{label}: {len(g)} cases: {agree} exact, {both_bad} both invalid, {sum(expl.values())} explained "
           f"({', '.join(f'{k} {v}' for k, v in sorted(expl.items()))}), {sum(unexp.values())} unexplained")
     for k, n in unexp.most_common(80 if not verbose else 10**6):
         e = ex[k][0]
         print(f"  {n:6d} {k}   e.g. {e[0]} ghidra={e[1]!r} dolphin={e[2]!r}")
     sys.exit(1 if unexp else 0)
-main()
+
+if __name__ == '__main__':
+    main()

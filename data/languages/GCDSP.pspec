@@ -25,6 +25,9 @@
     <symbol name="RST5" address="inst:000a" entry="true"/> <!-- Accelerator address overflow -->
     <symbol name="RST6" address="inst:000c" entry="true"/>
     <symbol name="RST7" address="inst:000e" entry="true"/> <!-- External interrupt (from CPU) -->
+    <!-- Conventional main entry point: the code that follows the eight two-word vectors. The boot ROM
+         starts a ucode there (DSPSpy, AX and Zelda ucodes all begin their main code at 0x0010). -->
+    <symbol name="MAIN" address="inst:0010" entry="true"/>
 
     <!-- Hardware registers - some from https://github.com/dolphin-emu/dolphin/blob/0b18f8ae55a21d8446083b92a6666199a478b0fe/Source/Core/Core/DSP/DSPCore.h#L136-L170 and https://github.com/dolphin-emu/dolphin/blob/ffdc8538a162b1ca56e3943c5a78c02358053b2a/Source/Core/Core/DSP/DSPTables.cpp#L333-L433 -->
     <!-- ADPCM coefficients -->

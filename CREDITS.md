@@ -54,3 +54,7 @@ All changes are commits on the `ghidra-rare` branch on top of the upstream commi
 * New: `GCDSPLoader` (raw ucode dumps, with `dsp_rom.bin`/`dsp_coef.bin` picked up next to them) replacing
   the 25-step manual import; `build.gradle`, `extension.properties`; the test suite under `test/`;
   `GHIDRA-RARE.md`; the full Apache-2.0 `LICENSE`; README updates.
+* `GCDSPLoader` ranks after the Raw Binary loader: a raw ucode has no signature, so the loader accepts almost
+  any small file, and ranked first it was used for every such import (a headless `-processor` import of
+  another language then failed). It is still offered; pick it by name (`-loader GCDSPLoader` headless).
+  It now refuses a non-GCDSP language with a clear error.

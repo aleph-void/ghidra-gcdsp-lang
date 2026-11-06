@@ -47,14 +47,17 @@ public class GCDSPLoader extends AbstractProgramWrapperLoader {
 		return NAME;
 	}
 
+	// A raw image has no signature, so this loader accepts almost any small file. It must rank
+	// below the Raw Binary loader (untargeted, priority 100): Ghidra imports with the first loader
+	// that accepts a file, and a headless import with -processor forces that language onto it.
 	@Override
 	public LoaderTier getTier() {
-		return LoaderTier.SPECIALIZED_TARGET_LOADER;
+		return LoaderTier.UNTARGETED_LOADER;
 	}
 
 	@Override
 	public int getTierPriority() {
-		return 60;
+		return 101;
 	}
 
 	@Override
@@ -89,6 +92,10 @@ public class GCDSPLoader extends AbstractProgramWrapperLoader {
 		Memory mem = program.getMemory();
 		AddressSpace inst = program.getAddressFactory().getAddressSpace("inst");
 		AddressSpace data = program.getAddressFactory().getAddressSpace("data");
+		if (inst == null || data == null) {
+			throw new IOException(NAME + " needs a GCDSP language, not " +
+				program.getLanguageID() + "; import other files with the Raw Binary loader");
+		}
 		try {
 			for (String n : new String[] { "iram", "irom", "dram", "coef", "ifx" }) {
 				removeBlock(mem, n, monitor);
